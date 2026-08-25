@@ -13,6 +13,9 @@
  *   POST /send-location  - Send location pin { chatId, latitude, longitude, name?, address? }
  *   POST /typing         - Send typing indicator { chatId }
  *   GET  /chat/:id       - Get chat info
+ *   GET  /groups         - List groups the account participates in
+ *   POST /group-participants - Add/remove group members { chatId, action, participants[] }
+ *   GET  /group-invite   - Get invite link for a group ?chatId=<jid>
  *   GET  /health         - Health check
  *
  * Usage:
@@ -1101,6 +1104,93 @@ app.get('/chat/:id', async (req, res) => {
     isGroup,
     participants: [],
   });
+});
+
+// All groups the connected account participates in
+app.get('/groups', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  try {
+    const groups = await sock.groupFetchAllParticipating();
+    const meId = jidNormalizedUser(sock.user?.id || '');
+    const groupsList = Object.values(groups || {}).map(g => {
+      const participants = g.participants || [];
+      const me = participants.find(p => jidNormalizedUser(p.id) === meId);
+      return {
+        id: g.id,
+        name: g.subject,
+        participantsCount: participants.length,
+        isAdmin: ['admin', 'superadmin'].includes(me?.admin) || !!me?.isAdmin || !!me?.isSuperAdmin,
+      };
+    });
+    res.json(groupsList);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add or remove participants in a group. Returns Baileys' per-participant
+// result array: [{ status: '200', jid, ... }, ...] — non-'200' statuses mean
+// WhatsApp rejected that participant (403 = privacy-blocked add, etc).
+app.post('/group-participants', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, action, participants } = req.body;
+  if (!chatId || !action || !Array.isArray(participants) || participants.length === 0) {
+    return res.status(400).json({ error: 'chatId, action, and participants[] are required' });
+  }
+  if (action !== 'add' && action !== 'remove') {
+    return res.status(400).json({ error: "action must be 'add' or 'remove'" });
+  }
+  if (!chatId.endsWith('@g.us')) {
+    return res.status(400).json({ error: 'chatId must be a group JID ending in @g.us' });
+  }
+
+  // Normalise raw numbers or JIDs to <digits>@s.whatsapp.net. Australian
+  // 10-digit numbers with a leading 0 become 61…; other digit shapes
+  // (already carrying their country code) pass through unchanged.
+  const jids = [];
+  for (const participant of participants) {
+    const digits = String(participant || '').replace(/\D/g, '');
+    if (!digits) {
+      return res.status(400).json({ error: `participant has no digits: ${participant}` });
+    }
+    const number = digits.length === 10 && digits.startsWith('0') ? `61${digits.slice(1)}` : digits;
+    jids.push(`${number}@s.whatsapp.net`);
+  }
+
+  try {
+    const result = await sock.groupParticipantsUpdate(chatId, jids, action);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Invite link for a group
+app.get('/group-invite', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const chatId = String(req.query.chatId || '');
+  if (!chatId || !chatId.endsWith('@g.us')) {
+    return res.status(400).json({ error: 'chatId query param must be a group JID ending in @g.us' });
+  }
+
+  try {
+    const code = await sock.groupInviteCode(chatId);
+    if (!code) {
+      return res.status(500).json({ error: 'No invite code available (admin-only and revoked groups return none)' });
+    }
+    res.json({ code, url: `https://chat.whatsapp.com/${code}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Health check
