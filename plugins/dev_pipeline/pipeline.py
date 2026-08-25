@@ -406,7 +406,13 @@ def scan_diff_for_secrets(diff_text: str) -> list[dict[str, str]]:
     seen: set[tuple[str, str]] = set()
 
     for line_no, line in enumerate(diff_text.splitlines(), start=1):
-        content = line[1:] if line[:1] in {"+", "-", " "} else line
+        # Only ADDED lines can introduce a secret into the branch.
+        # Context and removed lines are base content; scanning them
+        # produces false positives on legitimate code (local vars like
+        # ``password = read_env(...)``) and on lines the branch deletes.
+        if not line.startswith("+"):
+            continue
+        content = line[1:]
         for pattern_name, pattern in _SECRET_PATTERNS:
             if not pattern.search(content):
                 continue
